@@ -137,7 +137,7 @@ NEWS - list of user-visible changes between releases of GNU Libtool
 
   - Support for SerenityOS.
 
-  - Support for wasm32-emscripten.
+  - Support for WASI and WASIX.
 
 * Noteworthy changes in release 2.5.3 (2024-09-25) [stable]
 
