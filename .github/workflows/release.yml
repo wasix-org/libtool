@@ -1,0 +1,145 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    name: Verify Version Consistency
+    runs-on: ubuntu-latest
+    # Run on tag pushes, OR PRs where the source branch is release/*
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
+      (github.event_name == 'pull_request' && startsWith(github.head_ref, 'release/'))
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag or branch
+        id: extract
+        run: |
+          if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+            # --- Pull Request Logic ---
+            # Get version from the source branch name (e.g., release/0.2.5)
+            if [ -z "$GITHUB_HEAD_REF" ]; then
+              echo "ERROR: GITHUB_HEAD_REF is empty"
+              exit 1
+            fi
+
+            BRANCH="${GITHUB_HEAD_REF}"
+            
+            # Ensure branch matches release/*
+            if [[ ! "$BRANCH" =~ ^release/ ]]; then
+              echo "ERROR: Branch name must match 'release/*' (e.g., release/0.2.5)"
+              exit 1
+            fi
+
+            # Extract version by removing 'release/' prefix
+            VERSION="${BRANCH#release/}"
+            echo "Extracted version from PR branch: $VERSION"
+
+          else
+            # --- Tag Logic ---
+            # Get the tag name from the ref
+            if [ -z "$GITHUB_REF" ]; then
+              echo "ERROR: GITHUB_REF is empty"
+              exit 1
+            fi
+
+            # Check if this is a tag reference
+            if [[ ! "$GITHUB_REF" =~ refs/tags/ ]]; then
+              echo "ERROR: This workflow must be triggered by a tag push (refs/tags/v*)"
+              echo "Current GITHUB_REF: $GITHUB_REF"
+              exit 1
+            fi
+
+            TAG="${GITHUB_REF#refs/tags/}"
+            
+            # Verify tag starts with 'v' and follows semantic versioning
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              echo "ERROR: Tag must be in the format 'vX.Y.Z' (e.g., v0.2.5)"
+              echo "Current tag: $TAG"
+              exit 1
+            fi
+
+            # Remove 'v' prefix to get version
+            VERSION="${TAG#v}"
+            echo "Extracted version from tag: $VERSION"
+          fi
+
+          # --- Common Validation ---
+          # Ensure the extracted version is valid semantic versioning (X.Y.Z)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: Extracted version '$VERSION' is not valid (format X.Y.Z)"
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Verify prev-version version
+        run: |
+          VERSION="${{ steps.extract.outputs.version }}"
+          if [ ! -f ".prev-version" ]; then
+            echo "ERROR: .prev-version not found"
+            exit 1
+          fi
+          PREV_VERSION=$(cat .prev-version)
+          echo "prev-version version: $PREV_VERSION"
+          echo "Expected version: $VERSION"
+
+          if [ -z "$PREV_VERSION" ]; then
+            echo "ERROR: Could not extract version from .prev-version"
+            exit 1
+          fi
+
+          if [ "$PREV_VERSION" != "$VERSION" ]; then
+            echo "ERROR: .prev-version version ($PREV_VERSION) does not match extracted version ($VERSION)"
+            exit 1
+          fi
+          echo "✓ .prev-version version matches"
+
+
+      - name: Version verification complete
+        run: |
+          echo "✓ All version checks passed for version ${{ steps.extract.outputs.version }}"
+
+  build-tarball:
+    name: Build the release tarball
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/build-tarball.yml
+
+  publish-release:
+    name: Create Release
+    if: github.event_name != 'pull_request'
+    needs: [verify-version, build-tarball] # TODO: Add publish-crates-io when we no longer rely on git dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Move artifacts to root
+        run: |
+          mv artifacts/*/libtool-*.tar.gz .
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.verify-version.outputs.version }}
+          files: |
+            libtool-*.tar.gz
+          draft: false
+          prerelease: false
+          generate_release_notes: true

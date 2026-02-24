@@ -1,0 +1,144 @@
+name: Build and Package
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            container: alpine:3.23.3
+          # musl on arm64 is currently not supported by github javascript actions.
+          # - target: aarch64-unknown-linux-musl
+          #   os: ubuntu-24.04-arm
+          #   container: alpine:3.23.3
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+    
+    steps:      
+      - name: Install build dependencies (apt)
+        shell: sh
+        if: ${{ runner.os == 'Linux' && !matrix.container }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            help2man \
+            clang \
+            xz-utils \
+            automake \
+            autoconf \
+            make \
+            texinfo \
+            tar
+
+      - name: Install build dependencies (apk)
+        shell: sh
+        if: ${{ matrix.container != '' }}
+        run: |
+          apk add --no-cache \
+            build-base \
+            git \
+            curl \
+            help2man \
+            clang \
+            xz \
+            automake \
+            autoconf \
+            make \
+            texinfo \
+            tar \
+            bash \
+            perl \
+            m4 \
+            coreutils
+
+      - name: Install build dependencies (brew)
+        shell: sh
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          brew install \
+            xz \
+            make \
+            help2man \
+            automake \
+            autoconf \
+            texinfo \
+            m4
+          brew reinstall m4
+          echo "/usr/local/opt/m4/bin:/opt/homebrew/opt/m4/bin:/opt/homebrew/opt/make/libexec/gnubin" >> $GITHUB_PATH
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build tarball
+        shell: sh
+        run: |
+          MAKE=$(command -v gmake || command -v make)
+          bash bootstrap
+          ./configure --prefix=/
+          "$MAKE" -j4
+
+          TEMPDIR=$(mktemp -d)
+          "$MAKE" install DESTDIR="$TEMPDIR/libtool"
+          ln -s ../aclocal "$TEMPDIR/libtool/share/libtool/m4"
+          test -f "$TEMPDIR/libtool/bin/libtool"
+
+          cd "$TEMPDIR"/libtool
+          tar czf "$TEMPDIR"/libtool-${{ matrix.target }}.tar.gz *
+          cd -
+          mv "$TEMPDIR/libtool-${{ matrix.target }}.tar.gz" .
+      
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libtool-${{ matrix.target }}.tar.gz
+          path: |
+            libtool-${{ matrix.target }}.tar.gz
+
+  aggregate-artifacts:
+    name: Aggregate Artifacts
+    needs: build
+    runs-on: ubuntu-latest
+
+    outputs:
+      artifact-id: ${{ steps.upload-artifact.outputs.artifact-id }}
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create release bundle
+        run: |
+          mkdir release-bundle
+          mv ./artifacts/*/*.tar.gz ./release-bundle/
+          tar -czf release-bundle.tar.gz -C release-bundle .
+
+      - name: Upload release bundle
+        id: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle
+          path: release-bundle.tar.gz
